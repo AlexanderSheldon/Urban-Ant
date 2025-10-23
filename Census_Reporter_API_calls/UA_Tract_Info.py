@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import math
 import time
 import json
@@ -60,9 +61,7 @@ def fetch_cr_variable_for_tracts(
     max_workers: int = 8,
     request_timeout: float = 15.0,
 ) -> pd.DataFrame:
-    import pandas as pd
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import requests
+
 
     def _normalize_geoid(g):
         s = str(g)
@@ -83,7 +82,6 @@ def fetch_cr_variable_for_tracts(
             yield chunk
 
     def _fetch_batch(session, geoids, table_id, col_id, acs, timeout=15.0, max_retries=3, backoff=0.8):
-        import time, json, requests
         url = f"https://api.censusreporter.org/1.0/data/show/{acs}"
         params = {"table_ids": table_id, "geo_ids": ",".join(geoids)}
         last_exc = None
@@ -131,7 +129,7 @@ def fetch_cr_variable_for_tracts(
     return out
 
 
-def fetch_multiple_no_moe(df, geoid_col, vars_list):
+def fetch_multiple_no_moe(df, geoid_col, vars_dict):
     """
     Fetch multiple ACS variables from Census Reporter (estimates only).
     vars_list: list of (table_id, col_id)
@@ -140,6 +138,7 @@ def fetch_multiple_no_moe(df, geoid_col, vars_list):
     from functools import reduce
 
     results = []
+    vars_list  = [vars_dict[key] for key in vars_dict.keys()] # extract features from var's dictionary
     for table_id, col_id in vars_list:
         out = fetch_cr_variable_for_tracts(
             df=df,
@@ -159,6 +158,25 @@ def fetch_multiple_no_moe(df, geoid_col, vars_list):
     merged = reduce(lambda left, right: left.merge(right, on=geoid_col, how="left"), results)
     return merged
 
+def rename_cols(df, vars_dict):
+    """
+    vars_dict like:
+      {"total population": ("B01003", "B01003001"),
+       "median household income": ("B19013", "B19013001")}
+    """
+    df = df.copy()
+    df.columns = df.columns.map(str)   # normalize to strings
+
+    # reverse map: col_id -> friendly
+    rev = {v[1]: k for k, v in vars_dict.items()}
+
+    norm = lambda c: str(c).upper().replace("_", "")  # turn 'b01003_001' -> 'B01003001'
+
+    to_rename = {c: rev[norm(c)] for c in df.columns if norm(c) in rev}
+    return df.rename(columns=to_rename)
+
+
+
 '''
 ------------------------------------------------------------------------------------------------------------------------
 WORKING AREA
@@ -166,18 +184,53 @@ WORKING AREA
 '''
 
 
-variables = [
-    # ("Table_ID", "Variable_ID"), Table Name, Variable Name
-    ("B01003", "B01003001"),  # total population
-    ("B19013", "B19013001"),  # median household income
-    ("B01002", "B01002001"),  # median age
-    ('B08301', 'B08301010'),  # Means of transportation to work: Public transportation (excluding taxicab)
-]
+Raw_Variables_Dictionary = {
+    # 'Variable name' : ('Table_ID', 'Variable_ID')
+    'total population' : ("B01003", "B01003001"),
+    'median household income' : ("B19013", "B19013001"),
+    'median age' : ("B01002", "B01002001"),
+    'Means of transportation to work: Public transportation' : ('B08301', 'B08301010'),
+    'Travel Time to Work Total' : ('B08303', 'B08303001'),
+    # Time to work by Public Transit
+    "Total Travel Time to Work via Public transportation" : ('B08134', 'B08134061'),
+    "Less than 10 minutes Travel Time to Work via Public transportation" : ('B08134','B08134062'),
+    "10 to 14 minutes Travel Time to Work via Public transportation" : ('B08134','B08134063'),
+    "15 to 19 minutes Travel Time to Work via Public transportation" : ('B08134','B08134064'),
+    "20 to 24 minutes Travel Time to Work via Public transportation" : ('B08134','B08134065'),
+    "25 to 29 minutes Travel Time to Work via Public transportation" : ('B08134','B08134066'),
+    "30 to 34 minutes Travel Time to Work via Public transportation" : ('B08134','B08134067'),
+    "35 to 44 minutes Travel Time to Work via Public transportation" : ('B08134','B08134068'),
+    "45 to 59 minutes Travel Time to Work via Public transportation" : ('B08134','B08134069'),
+    "60 or more minutes Travel Time to Work via Public transportation" : ('B08134','B08134070'),
+
+    # Time to work by Driving (with no carpooling)
+    "Total Travel Time to Work via Driving Alone" : ('B08134','B08134021'),
+    "Less than 10 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134022'),
+    "10 to 14 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134023'),
+    "15 to 19 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134024'),
+    "20 to 24 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134025'),
+    "25 to 29 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134026'),
+    "30 to 34 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134027'),
+    "35 to 44 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134028'),
+    "45 to 59 minutes Travel Time to Work via Driving Alone" : ('B08134','B08134029'),
+    "60 or more minutes Travel Time to Work via Driving Alone" : ('B08134','B08134030')
+}
 
 # Uses only first 100 rows for testing purposes. (comment out when compiling final dataset)
 df=df.head(100)
 
-# Example usage
-merge_df = fetch_multiple_no_moe(df, "geoid", variables)
+# call the variables for the df
+raw_vars_df = fetch_multiple_no_moe(df, "geoid", Raw_Variables_Dictionary)
+
+raw_vars_df = rename_cols(raw_vars_df, Raw_Variables_Dictionary)
+
+merge_df = pd.merge(df, raw_vars_df, on='geoid', how='inner')
 
 print('heading: \n', merge_df.head())
+
+print(merge_df.columns)
+
+print(merge_df[['Total Travel Time to Work via Driving Alone',
+                'Total Travel Time to Work via Public transportation','Travel Time to Work Total']].head())
+
+merge_df.to_csv('/workspaces/Urban-Ant/Census_Reporter_API_calls/RawData.csv', index = False)
