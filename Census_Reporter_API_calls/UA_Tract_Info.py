@@ -217,7 +217,7 @@ Raw_Variables_Dictionary = {
 }
 
 # Uses only first 100 rows for testing purposes. (comment out when compiling final dataset)
-df=df.head(100)
+# df=df.head(100)
 
 # call the variables for the df
 raw_vars_df = fetch_multiple_no_moe(df, "geoid", Raw_Variables_Dictionary)

@@ -70,3 +70,5 @@ df_out = df[keep]
 
 print(df.head())
 print(df.columns)
+
+df.to_csv('/workspaces/Urban-Ant/Census_Reporter_API_calls/Transformed_Data.csv', index = False)
