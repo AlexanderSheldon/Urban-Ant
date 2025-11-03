@@ -1,0 +1,141 @@
+# Mycelium_Network_V1
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+from collections import defaultdict
+from heapq import heappush, heappop
+
+# --- Grid builder with random maze obstacles ---
+def make_complex_grid(width, height, density=0.25, corridor_bias=0.6):
+    """
+    Create a maze-like grid by randomly placing obstacles but leaving corridors.
+    density: fraction of cells blocked overall.
+    corridor_bias: 0–1, higher = more horizontal/vertical channels open.
+    """
+    obstacles=set()
+    for y in range(height):
+        for x in range(width):
+            if random.random()<density:
+                # randomly skip some obstacles to make corridors
+                if random.random()>corridor_bias:
+                    obstacles.add((x,y))
+    return obstacles
+
+# --- Core solver ---
+def physarum_solver(nodes, edges, source, sink, iters=1500, dt=0.3, decay=0.08):
+    idx={n:i for i,n in enumerate(nodes)}
+    n=len(nodes)
+    D={e:0.5 for e in edges}
+    L={e:1.0 for e in edges}
+    b=np.zeros(n)
+    b[idx[source]],b[idx[sink]]=1,-1
+    for _ in range(iters):
+        A=np.zeros((n,n))
+        for (u,v) in edges:
+            i,j=idx[u],idx[v]
+            g=D[(u,v)]/L[(u,v)]
+            A[i,i]+=g;A[j,j]+=g
+            A[i,j]-=g;A[j,i]-=g
+        ref=idx[source]
+        A[ref,:]=0;A[ref,ref]=1
+        b_ref=b.copy();b_ref[ref]=0
+        p=np.linalg.solve(A,b_ref)
+        for (u,v) in edges:
+            i,j=idx[u],idx[v]
+            q=(D[(u,v)]/L[(u,v)])*(p[i]-p[j])
+            D[(u,v)]+=dt*(abs(q)-decay*D[(u,v)])
+            D[(u,v)]=max(D[(u,v)],0)
+    return D
+
+# --- Strongest path extraction ---
+def strongest_path(nodes, edges, D, source, sink):
+    nbrs=defaultdict(list)
+    for (u,v) in edges:
+        nbrs[u].append(v)
+        nbrs[v].append(u)
+    def cost(u,v):
+        return 1.0/max(D.get((u,v),D.get((v,u),1e-9)),1e-9)
+    dist={n:float('inf') for n in nodes}
+    prev={}
+    dist[source]=0
+    pq=[(0,source)]
+    while pq:
+        d,u=heappop(pq)
+        if u==sink:break
+        if d!=dist[u]:continue
+        for v in nbrs[u]:
+            nd=d+cost(u,v)
+            if nd<dist[v]:
+                dist[v]=nd;prev[v]=u;heappush(pq,(nd,v))
+    if sink not in prev:return []
+    path=[sink]
+    while path[-1]!=source:path.append(prev[path[-1]])
+    return list(reversed(path))
+
+# --- Grid and drawing ---
+def grid_graph(width, height, obstacles=None, diag=False):
+    obstacles=obstacles or set()
+    nodes,edges=[],[]
+    dirs=[(1,0),(-1,0),(0,1),(0,-1)]
+    if diag:dirs+=[(1,1),(1,-1),(-1,1),(-1,-1)]
+    def inside(x,y):return 0<=x<width and 0<=y<height and (x,y) not in obstacles
+    for y in range(height):
+        for x in range(width):
+            if inside(x,y):
+                nodes.append((x,y))
+                for dx,dy in dirs:
+                    nx,ny=x+dx,y+dy
+                    if inside(nx,ny) and (x,y)<(nx,ny):
+                        edges.append(((x,y),(nx,ny)))
+    return nodes,edges
+
+def draw_network(D,width,height,obstacles,source,sink,path=None,show_intensity=True):
+    fig,ax=plt.subplots(figsize=(8,6))
+    ax.set_xlim(-0.5,width-0.5)
+    ax.set_ylim(-0.5,height-0.5)
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    maxD=max(D.values())
+    for (u,v),d in D.items():
+        (x1,y1),(x2,y2)=u,v
+        if d<=1e-4:continue
+        c='lime' if show_intensity else 'gray'
+        lw=0.5+4*(d/maxD)
+        ax.plot([x1,x2],[y1,y2],color=c,lw=lw,alpha=0.5)
+    if obstacles:
+        obs=np.array(list(obstacles))
+        ax.scatter(obs[:,0],obs[:,1],s=80,c='dimgray',marker='s',alpha=0.9)
+    if path:
+        xs,ys=zip(*path)
+        ax.plot(xs,ys,color='yellow',lw=5,alpha=0.9,label='Optimal Path')
+    ax.scatter(*source,s=150,c='blue',marker='o',label='Source')
+    ax.scatter(*sink,s=150,c='red',marker='o',label='Sink')
+    ax.axis('off')
+    ax.legend(loc='upper right')
+    plt.show()
+
+# --- Demo run ---
+if __name__=="__main__":
+    W,H=30,18
+    random.seed(7)
+    obstacles=make_complex_grid(W,H,density=0.28,corridor_bias=0.7)
+    nodes,edges=grid_graph(W,H,obstacles,diag=True)
+    source=(1,1)
+    # Ensure sink is a valid node
+    sink = (28, 16)
+    if sink not in nodes:
+        # If the desired sink is an obstacle, find a valid alternative (e.g., nearest valid node)
+        # For simplicity, let's just pick a random valid node near the desired sink
+        valid_nodes_near_sink = [n for n in nodes if abs(n[0] - sink[0]) <= 2 and abs(n[1] - sink[1]) <= 2]
+        if valid_nodes_near_sink:
+            sink = random.choice(valid_nodes_near_sink)
+        else:
+            # As a fallback, pick any random valid node
+            sink = random.choice(nodes)
+
+    print("Running Physarum solver...")
+    D=physarum_solver(nodes,edges,source,sink,iters=2000,dt=0.25,decay=0.1)
+    path=strongest_path(nodes,edges,D,source,sink)
+    draw_network(D,W,H,obstacles,source,sink,path)
+
+    print("Path:", path)
