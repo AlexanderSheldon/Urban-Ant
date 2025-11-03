@@ -1,0 +1,236 @@
+# Genetic Algorithm
+
+import math, random
+import numpy as np
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+from heapq import heappush, heappop
+from matplotlib.animation import FuncAnimation
+
+random.seed(7)
+
+# ============================================================
+#  Basic Data Structures
+# ============================================================
+@dataclass
+class Node:
+    id: int
+    x: float
+    y: float
+    demand: float = 0.0
+    is_substation: bool = False
+    supply: float = 0.0
+
+@dataclass
+class Edge:
+    u: int
+    v: int
+    length: float
+    resistance: float
+    capacity: float
+    build_cost: float
+
+# ============================================================
+# Synthetic City Generator
+# ============================================================
+def generate_city(n_demands=30, n_substations=3, width=1.0, height=1.0,
+                  demand_range=(2.0, 8.0), substation_supply=100.0,
+                  k_neighbors=5, r_per_km=0.05, cap_per_km=25.0, cost_per_km=1.0):
+    nodes = []
+    # Substations in a triangular pattern
+    for i in range(n_substations):
+        x = 0.2 + 0.6 * math.cos(2 * math.pi * i / n_substations)
+        y = 0.5 + 0.35 * math.sin(2 * math.pi * i / n_substations)
+        nodes.append(Node(i, x * width, y * height, 0.0, True, substation_supply))
+
+    # Demand nodes scattered randomly
+    for j in range(n_demands):
+        x, y = random.random() * width, random.random() * height
+        d = random.uniform(*demand_range)
+        nodes.append(Node(n_substations + j, x, y, d, False, 0.0))
+
+    # Candidate edges (k-nearest neighbors)
+    pts = np.array([(n.x, n.y) for n in nodes])
+    edges = []
+    for i in range(len(nodes)):
+        dists = np.sqrt(((pts - pts[i]) ** 2).sum(axis=1))
+        nbrs = np.argsort(dists)[1:k_neighbors + 1]
+        for j in nbrs:
+            if i < j:
+                L = dists[j] * 100
+                R = max(1e-3, r_per_km * (L / 100))
+                cap = cap_per_km * (L / 100) + 30
+                cost = cost_per_km * L
+                edges.append(Edge(i, j, L, R, cap, cost))
+    return nodes, edges
+
+# ============================================================
+#Flow + Fitness Evaluation
+# ============================================================
+def dijkstra_path(graph, edges_map, cap_left, s, t):
+    pq = [(0, s)]
+    dist = {s: 0}
+    prev = {}
+    while pq:
+        d, u = heappop(pq)
+        if u == t:
+            break
+        if d != dist[u]:
+            continue
+        for v in graph.get(u, []):
+            ekey = (u, v) if (u, v) in edges_map else (v, u)
+            if cap_left.get(ekey, 0) <= 0:
+                continue
+            nd = d + edges_map[ekey].length
+            if nd < dist.get(v, 1e9):
+                dist[v] = nd
+                prev[v] = u
+                heappush(pq, (nd, v))
+    if t not in prev:
+        return None
+    path = [t]
+    while path[-1] != s:
+        path.append(prev[path[-1]])
+    return list(reversed(path))
+
+def evaluate(nodes, edges, bits, w_unserved=1e5, w_loss=1.0, w_cost=1.0, w_redund=500.0):
+    built = [e for e, b in zip(edges, bits) if b]
+    edges_map = {(e.u, e.v): e for e in built}
+    edges_map.update({(e.v, e.u): e for e in built})
+    graph = {}
+    for e in built:
+        graph.setdefault(e.u, []).append(e.v)
+        graph.setdefault(e.v, []).append(e.u)
+    cap_left = {(e.u, e.v): e.capacity for e in built}
+    cap_left.update({(e.v, e.u): e.capacity for e in built})
+    flow_uv = {(e.u, e.v): 0.0 for e in built}
+    flow_uv.update({(e.v, e.u): 0.0 for e in built})
+    subs = [n for n in nodes if n.is_substation]
+    sub_supply = {s.id: s.supply for s in subs}
+    unmet = 0.0
+
+    for load in sorted([n for n in nodes if not n.is_substation], key=lambda n: n.demand, reverse=True):
+        best = None
+        for s in subs:
+            path = dijkstra_path(graph, edges_map, cap_left, s.id, load.id)
+            if not path:
+                continue
+            bott = min(cap_left[(u, v) if (u, v) in edges_map else (v, u)] for u, v in zip(path[:-1], path[1:]))
+            avail = min(bott, sub_supply[s.id], load.demand)
+            if avail > 0:
+                L = sum(edges_map[(u, v) if (u, v) in edges_map else (v, u)].length for u, v in zip(path[:-1], path[1:]))
+                if not best or L < best[3]:
+                    best = (s.id, path, avail, L)
+        if not best:
+            unmet += load.demand
+            continue
+        s_id, path, serve, _ = best
+        for u, v in zip(path[:-1], path[1:]):
+            k = (u, v) if (u, v) in edges_map else (v, u)
+            cap_left[k] -= serve
+            cap_left[(k[1], k[0])] -= serve
+            flow_uv[k] += serve
+            flow_uv[(k[1], k[0])] += serve
+        sub_supply[s_id] -= serve
+        if serve < load.demand:
+            unmet += load.demand - serve
+
+    build = sum(e.build_cost for e in built) * w_cost
+    loss = sum((abs(flow_uv[(e.u, e.v)] / 2) ** 2) * e.resistance for e in built) * w_loss
+    deg = {n.id: 0 for n in nodes}
+    for e in built:
+        deg[e.u] += 1
+        deg[e.v] += 1
+    redund = sum(1 for n in nodes if not n.is_substation and deg[n.id] >= 2) * w_redund
+    fit = build + loss + unmet * w_unserved - redund
+    return fit, {"unserved": unmet, "build": build, "loss": loss}, built, flow_uv
+
+# ============================================================
+# Genetic Algorithm
+# ============================================================
+def run_ga(nodes, edges, pop_size=40, gens=80, p_cx=0.9, p_mut=0.02):
+    nE = len(edges)
+    def new_ind(): return [1 if random.random() < 0.15 else 0 for _ in range(nE)]
+    pop = [new_ind() for _ in range(pop_size)]
+    def fit(i): return evaluate(nodes, edges, i)[0]
+    def cross(a, b):
+        if random.random() > p_cx: return a[:], b[:]
+        c = random.randrange(1, nE - 1)
+        return a[:c] + b[c:], b[:c] + a[c:]
+    def mutate(i):
+        for j in range(nE):
+            if random.random() < p_mut: i[j] ^= 1
+    best, bestfit = None, 1e12
+    history = []
+    for g in range(gens):
+        scored = [(i, fit(i)) for i in pop]
+        scored.sort(key=lambda x: x[1])
+        if scored[0][1] < bestfit:
+            bestfit = scored[0][1]
+            best = scored[0][0][:]
+        history.append(best[:])
+        new = [scored[0][0][:], scored[1][0][:]]
+        while len(new) < pop_size:
+            p1, p2 = random.choice(pop), random.choice(pop)
+            c1, c2 = cross(p1, p2)
+            mutate(c1)
+            mutate(c2)
+            new += [c1, c2]
+        pop = new[:pop_size]
+        if g % 10 == 0:
+            print(f"Gen {g:3d} | Best fitness: {bestfit:,.0f}")
+    return history
+
+# ============================================================
+#   Visualization
+# ============================================================
+def animate_evolution(nodes, edges, history):
+    fig, ax = plt.subplots(figsize=(8, 7))
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    scat_sub = ax.scatter([], [], s=100, c='gold', edgecolor='black', zorder=3)
+    scat_dem = ax.scatter([], [], s=40, c='green', edgecolor='black', zorder=3)
+    line_objs = [ax.plot([], [], lw=0.5, color='lightgray', alpha=0.3, zorder=1)[0]
+                 for _ in edges]
+    title = ax.text(0.5, 1.02, "", transform=ax.transAxes, ha='center', fontsize=12)
+
+    subs = [n for n in nodes if n.is_substation]
+    loads = [n for n in nodes if not n.is_substation]
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    scat_sub.set_offsets([[n.x, n.y] for n in subs])
+    scat_dem.set_offsets([[n.x, n.y] for n in loads])
+
+    def update(frame):
+        bits = history[frame]
+        _, rep, _, _ = evaluate(nodes, edges, bits)
+        for e, ln, b in zip(edges, line_objs, bits):
+            if b:
+                ln.set_data([nodes[e.u].x, nodes[e.v].x],
+                            [nodes[e.u].y, nodes[e.v].y])
+                ln.set_linewidth(1.2)
+                ln.set_color('tab:blue')
+                ln.set_alpha(0.8)
+            else:
+                ln.set_data([], [])
+        title.set_text(
+            f"Gen {frame+1}/{len(history)} | "
+            f"Build ${rep['build']:.0f}, "
+            f"Loss {rep['loss']:.1f}, "
+            f"Unserved {rep['unserved']:.1f} MW"
+        )
+        return line_objs + [scat_sub, scat_dem, title]
+
+    anim = FuncAnimation(fig, update, frames=len(history), interval=200, repeat=False)
+    fig.anim = anim  # prevent garbage collection
+    plt.show()
+
+# ============================================================
+# Run Demo
+# ============================================================
+if __name__ == "__main__":
+    nodes, edges = generate_city()
+    history = run_ga(nodes, edges, pop_size=40, gens=60)
+    animate_evolution(nodes, edges, history)
