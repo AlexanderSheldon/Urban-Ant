@@ -1,0 +1,143 @@
+# Ant_Colony_Optimisation_V1
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+from collections import defaultdict
+from heapq import heappush, heappop
+
+# --------------------------
+# Grid + Maze
+# --------------------------
+def make_complex_grid(width, height, density=0.25, corridor_bias=0.6):
+    obstacles=set()
+    for y in range(height):
+        for x in range(width):
+            if random.random()<density:
+                if random.random()>corridor_bias:
+                    obstacles.add((x,y))
+    return obstacles
+
+def grid_graph(width, height, obstacles=None, diag=False):
+    obstacles=obstacles or set()
+    nodes,edges=[],[]
+    dirs=[(1,0),(-1,0),(0,1),(0,-1)]
+    if diag:dirs+=[(1,1),(1,-1),(-1,1),(-1,-1)]
+    def inside(x,y):return 0<=x<width and 0<=y<height and (x,y) not in obstacles
+    for y in range(height):
+        for x in range(width):
+            if inside(x,y):
+                nodes.append((x,y))
+                for dx,dy in dirs:
+                    nx,ny=x+dx,y+dy
+                    if inside(nx,ny) and (x,y)<(nx,ny):
+                        edges.append(((x,y),(nx,ny)))
+    return nodes,edges
+
+# --------------------------
+# Ant Colony Optimization
+# --------------------------
+def ant_colony_path(nodes, edges, source, sink, n_ants=80, n_iter=200, 
+                    alpha=1.0, beta=4.0, rho=0.3, Q=100):
+    """ACO on grid edges with visualization-friendly pheromone matrix."""
+    # Build adjacency
+    nbrs=defaultdict(list)
+    length={}
+    for (u,v) in edges:
+        nbrs[u].append(v);nbrs[v].append(u)
+        length[(u,v)]=length[(v,u)]=np.hypot(v[0]-u[0],v[1]-u[1])
+    pheromone={(u,v):1.0 for (u,v) in edges}
+    pheromone.update({(v,u):1.0 for (u,v) in edges})
+
+    best_path,best_cost=None,float('inf')
+
+    for iteration in range(n_iter):
+        all_paths=[]
+        for _ in range(n_ants):
+            path,cost=construct_path(source,sink,nbrs,length,pheromone,alpha,beta)
+            if path:
+                all_paths.append((path,cost))
+                if cost<best_cost:
+                    best_path,best_cost=path,cost
+        # Evaporate pheromones
+        for e in pheromone:
+            pheromone[e]*=(1-rho)
+        # Deposit pheromones along good paths
+        for path,cost in all_paths:
+            for i in range(len(path)-1):
+                u,v=path[i],path[i+1]
+                pheromone[(u,v)]+=Q/cost
+                pheromone[(v,u)]+=Q/cost
+        if iteration%10==0:
+            print(f"Iteration {iteration:3d} | best cost = {best_cost:.2f}")
+    return pheromone,best_path,best_cost
+
+def construct_path(source,sink,nbrs,length,pheromone,alpha,beta):
+    path=[source];visited={source};cost=0
+    current=source
+    while current!=sink:
+        choices=[]
+        total=0
+        for n in nbrs[current]:
+            if n not in visited:
+                tau=pheromone[(current,n)]**alpha
+                eta=(1.0/length[(current,n)])**beta
+                total+=tau*eta
+                choices.append((n,tau*eta,length[(current,n)]))
+        if not choices:
+            return None,float('inf')
+        # roulette selection
+        r=random.random()*total
+        s=0
+        for n,p,l in choices:
+            s+=p
+            if s>=r:
+                path.append(n)
+                visited.add(n)
+                cost+=l
+                current=n
+                break
+        if len(path)>len(nbrs)*10:  # prevent endless loops
+            return None,float('inf')
+    return path,cost
+
+# --------------------------
+# Visualization
+# --------------------------
+def draw_pheromones(pheromone,width,height,obstacles,source,sink,path=None):
+    fig,ax=plt.subplots(figsize=(8,6))
+    ax.set_xlim(-0.5,width-0.5)
+    ax.set_ylim(-0.5,height-0.5)
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    maxP=max(pheromone.values())
+    for (u,v),p in pheromone.items():
+        (x1,y1),(x2,y2)=u,v
+        if p<0.1:continue
+        ax.plot([x1,x2],[y1,y2],color='deepskyblue',alpha=min(1.0,p/maxP),lw=2*(p/maxP))
+    if obstacles:
+        obs=np.array(list(obstacles))
+        ax.scatter(obs[:,0],obs[:,1],s=90,c='dimgray',marker='s',alpha=0.9)
+    if path:
+        xs,ys=zip(*path)
+        ax.plot(xs,ys,color='yellow',lw=4,alpha=0.9,label='Best Path')
+    ax.scatter(*source,s=150,c='blue',marker='o',label='Source')
+    ax.scatter(*sink,s=150,c='red',marker='o',label='Sink')
+    ax.axis('off')
+    ax.legend(loc='upper right')
+    plt.show()
+
+# --------------------------
+# Demo run
+# --------------------------
+if __name__=="__main__":
+    random.seed(5)
+    W,H=28,16
+    obstacles=make_complex_grid(W,H,density=0.25,corridor_bias=0.7)
+    nodes,edges=grid_graph(W,H,obstacles,diag=True)
+    source=(1,1)
+    sink=(26,14)
+    print("Running Ant Colony Optimization...")
+    pheromone,best_path,best_cost=ant_colony_path(nodes,edges,source,sink,
+        n_ants=80,n_iter=250,alpha=1.0,beta=5.0,rho=0.3,Q=100)
+    print(f"Best path cost: {best_cost:.2f}, length = {len(best_path)}")
+    draw_pheromones(pheromone,W,H,obstacles,source,sink,best_path)
